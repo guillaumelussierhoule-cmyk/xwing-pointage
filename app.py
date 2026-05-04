@@ -495,7 +495,7 @@ else:
         type="password"
     )
 
-    if mot_de_passe != "2000":
+    if mot_de_passe != st.secrets["app"]["gm_password"]:
         st.error(
             "Accès maître de jeu refusé. Entre le bon mot de passe dans la barre de gauche.")
         st.info(
