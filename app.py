@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import base64
+import gspread
 from pathlib import Path
+from google.oauth2.service_account import Credentials
 
 # -----------------------------------
 # App configuration
@@ -13,9 +15,180 @@ st.set_page_config(
 )
 
 
+@st.cache_resource
+def connecter_google_sheet():
+    """
+    Connecte l'app Streamlit à Google Sheets en utilisant les secrets.
+    Retourne le fichier Google Sheet ouvert.
+    """
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+
+    credentials = Credentials.from_service_account_info(
+        st.secrets["google_service_account"],
+        scopes=scopes
+    )
+
+    client = gspread.authorize(credentials)
+
+    sheet = client.open(
+        st.secrets["google_sheet"]["sheet_name"]
+    )
+
+    return sheet
+
+
+def charger_onglet(sheet, nom_onglet):
+    """
+    Lit un onglet Google Sheets et le transforme en DataFrame Pandas.
+    Si l'onglet est vide, retourne un DataFrame vide.
+    """
+    worksheet = sheet.worksheet(nom_onglet)
+    data = worksheet.get_all_records()
+
+    if not data:
+        return pd.DataFrame()
+
+    return pd.DataFrame(data)
+
+
+def sauvegarder_onglet(sheet, nom_onglet, df):
+    """
+    Sauvegarde un DataFrame Pandas dans un onglet Google Sheets.
+    Efface l'ancien contenu de l'onglet et écrit les nouvelles données.
+    """
+    worksheet = sheet.worksheet(nom_onglet)
+
+    df = df.fillna("")
+    valeurs = [df.columns.tolist()] + df.astype(str).values.tolist()
+
+    worksheet.clear()
+    worksheet.update(valeurs)
+
+
+def charger_donnees_google_sheets(sheet):
+    """
+    Charge les données depuis Google Sheets vers st.session_state.
+    """
+    joueurs_df = charger_onglet(sheet, "joueurs")
+    vaisseaux_df = charger_onglet(sheet, "vaisseaux")
+    touches_df = charger_onglet(sheet, "touches")
+    bonus_df = charger_onglet(sheet, "bonus")
+    settings_df = charger_onglet(sheet, "settings")
+
+    if not joueurs_df.empty:
+        st.session_state.joueurs = joueurs_df
+
+    if not vaisseaux_df.empty:
+        st.session_state.vaisseaux = vaisseaux_df
+
+    if not touches_df.empty:
+        if "Vaisseau" in touches_df.columns:
+            touches_df = touches_df.set_index("Vaisseau")
+
+        st.session_state.touches = touches_df.apply(
+            pd.to_numeric,
+            errors="ignore"
+        )
+
+    if not bonus_df.empty:
+        st.session_state.bonus_points = dict(
+            zip(bonus_df["Joueur"], pd.to_numeric(
+                bonus_df["Bonus PV"], errors="coerce").fillna(0).astype(int))
+        )
+
+        st.session_state.bonus_credits = dict(
+            zip(bonus_df["Joueur"], pd.to_numeric(
+                bonus_df["Bonus crédits"], errors="coerce").fillna(0).astype(int))
+        )
+
+        st.session_state.bonus_xp = dict(
+            zip(bonus_df["Joueur"], pd.to_numeric(
+                bonus_df["Bonus XP"], errors="coerce").fillna(0).astype(int))
+        )
+
+    if not settings_df.empty:
+        try:
+            valeur = settings_df.loc[
+                settings_df["Paramètre"] == "devoiler_recompenses",
+                "Valeur"
+            ].iloc[0]
+
+            st.session_state.devoiler_recompenses = str(
+                valeur).lower() == "true"
+
+        except Exception:
+            pass
+
+
+def sauvegarder_donnees_google_sheets(sheet):
+    """
+    Sauvegarde les données actuelles de st.session_state vers Google Sheets.
+    """
+    sauvegarder_onglet(
+        sheet,
+        "joueurs",
+        st.session_state.joueurs
+    )
+
+    sauvegarder_onglet(
+        sheet,
+        "vaisseaux",
+        st.session_state.vaisseaux
+    )
+
+    touches_export = st.session_state.touches.copy()
+    touches_export.insert(0, "Vaisseau", touches_export.index)
+
+    sauvegarder_onglet(
+        sheet,
+        "touches",
+        touches_export.reset_index(drop=True)
+    )
+
+    joueurs = joueurs_actuels()
+
+    bonus_export = pd.DataFrame({
+        "Joueur": joueurs,
+        "Bonus PV": [
+            st.session_state.bonus_points.get(joueur, 0)
+            for joueur in joueurs
+        ],
+        "Bonus crédits": [
+            st.session_state.bonus_credits.get(joueur, 0)
+            for joueur in joueurs
+        ],
+        "Bonus XP": [
+            st.session_state.bonus_xp.get(joueur, 0)
+            for joueur in joueurs
+        ],
+    })
+
+    sauvegarder_onglet(
+        sheet,
+        "bonus",
+        bonus_export
+    )
+
+    settings_export = pd.DataFrame({
+        "Paramètre": ["devoiler_recompenses"],
+        "Valeur": [str(st.session_state.devoiler_recompenses)]
+    })
+
+    sauvegarder_onglet(
+        sheet,
+        "settings",
+        settings_export
+    )
+
 # -----------------------------------
 # Background image
 # -----------------------------------
+
+
 def ajouter_background(image_path: str):
     """Ajoute un background si le fichier existe."""
     if not Path(image_path).exists():
@@ -292,6 +465,25 @@ if mode == "Joueur":
     st.sidebar.info(
         "Mode lecture seulement : les joueurs peuvent voir le classement et les valeurs marginales."
     )
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Google Sheets")
+
+    try:
+        sheet = connecter_google_sheet()
+
+        if st.sidebar.button("Rafraîchir les données"):
+            charger_donnees_google_sheets(sheet)
+            st.sidebar.success("Données rafraîchies.")
+            st.rerun()
+
+    except Exception as e:
+        st.sidebar.error("Connexion Google Sheets impossible.")
+        st.sidebar.caption(
+            "Vérifie les secrets Streamlit, le nom du Google Sheet et le partage avec le service account."
+        )
+        st.sidebar.write(e)
+
 else:
     st.sidebar.warning("Mode maître de jeu : accès protégé par mot de passe.")
 
@@ -309,6 +501,27 @@ else:
 
     st.sidebar.success("Accès maître de jeu autorisé.")
 
+    st.sidebar.divider()
+    st.sidebar.subheader("Google Sheets")
+
+    try:
+        sheet = connecter_google_sheet()
+
+        if st.sidebar.button("Charger depuis Google Sheets"):
+            charger_donnees_google_sheets(sheet)
+            st.sidebar.success("Données chargées.")
+            st.rerun()
+
+        if st.sidebar.button("Sauvegarder vers Google Sheets"):
+            sauvegarder_donnees_google_sheets(sheet)
+            st.sidebar.success("Données sauvegardées.")
+
+    except Exception as e:
+        st.sidebar.error("Connexion Google Sheets impossible.")
+        st.sidebar.caption(
+            "Vérifie les secrets Streamlit, le nom du Google Sheet et le partage avec le service account."
+        )
+        st.sidebar.write(e)
 
 # -----------------------------------
 # Page 1: Préparation de jeu
