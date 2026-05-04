@@ -89,10 +89,13 @@ def charger_donnees_google_sheets(sheet):
         if "Vaisseau" in touches_df.columns:
             touches_df = touches_df.set_index("Vaisseau")
 
-        st.session_state.touches = touches_df.apply(
-            pd.to_numeric,
-            errors="ignore"
-        )
+        for colonne in touches_df.columns:
+            touches_df[colonne] = pd.to_numeric(
+                touches_df[colonne],
+                errors="coerce"
+            ).fillna(0).astype(int)
+
+        st.session_state.touches = touches_df
 
     if not bonus_df.empty:
         st.session_state.bonus_points = dict(
